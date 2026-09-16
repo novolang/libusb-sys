@@ -1,0 +1,295 @@
+// API tests for the libusb-1.0 bindings.
+//
+// Every test below calls into the C library, so the suite needs
+// libusb-1.0 installed and linked.  `novo pkg build` type-checks the
+// declarations without it; `novo test` runs them and does not.
+//
+// NO TEST NEEDS A DEVICE AND NO TEST NEEDS PRIVILEGES.  Starting a
+// session, reading the version, naming an error code and listing the
+// devices are what an ordinary user may do; the list is allowed to be
+// empty, and every assertion about a device is inside a branch that a
+// machine with no device does not take.  Opening a device is the call
+// that needs privileges, and the one test that reaches it asks for a
+// vendor and product identifier no device has, so the open fails and
+// the sequence behind it is never run.
+
+use std.test
+use libusb
+
+// `LIBUSB_LOG_LEVEL_NONE`, the quietest logging level.
+const LOG_NONE: Int = 0
+
+// `LIBUSB_CAP_HAS_CAPABILITY`, the capability query itself, which
+// every build of the library answers 1 for.
+const CAP_HAS_CAPABILITY: Int = 0x0000
+
+// `LIBUSB_ERROR_ACCESS` and `LIBUSB_ERROR_NOT_FOUND`.
+const ERROR_ACCESS: Int = -3
+const ERROR_NOT_FOUND: Int = -5
+
+// The length and the type byte of a USB device descriptor.
+const DEVICE_DESCRIPTOR_LEN: Int = 18
+const DESCRIPTOR_TYPE_DEVICE: Int = 1
+
+// The length and the type byte of a USB configuration descriptor.
+const CONFIG_DESCRIPTOR_LEN: Int = 9
+const DESCRIPTOR_TYPE_CONFIG: Int = 2
+
+// A chain of ports is at most seven long in the USB specification.
+const MAX_PORT_DEPTH: Int = 7
+
+// A vendor and a product identifier no device has: the USB
+// specification reserves 0x0000 for "no vendor".
+const NO_VENDOR: Int = 0x0000
+const NO_PRODUCT: Int = 0x0000
+
+// Start a session and answer its context.
+fn session() -> Int [io, ffi]
+    let slot = ptr.alloc_word()
+    let rc = libusb.libusb_init(slot)
+    let ctx = ptr.read_word(slot)
+    ptr.free(slot)
+    if rc != 0
+        return 0
+    return ctx
+
+@test
+fn test_a_session_starts_and_ends() [io, ffi]
+    test.case("libusb_init, libusb_exit, libusb_set_debug")
+    let slot = ptr.alloc_word()
+    test.assert(libusb.libusb_init(slot) == 0)
+    let ctx = ptr.read_word(slot)
+    test.assert(ctx != 0)
+    // Quiet, so a test run writes nothing to the standard error stream.
+    libusb.libusb_set_debug(ctx, LOG_NONE)
+    libusb.libusb_exit(ctx)
+    ptr.free(slot)
+
+@test
+fn test_the_library_reports_its_version_and_its_capabilities() [io, ffi]
+    test.case("libusb_get_version, libusb_has_capability, libusb_setlocale")
+    // The version structure is four two-byte numbers: major, minor,
+    // micro and nano, then two addresses.
+    let v = libusb.libusb_get_version()
+    test.assert(v != 0)
+    test.assert(ptr.load_u8(v) == 1)
+    test.assert(ptr.load_u8(v + 1) == 0)
+    test.assert(ptr.load_u8(v + 2) == 0)
+    // Every build answers the capability query itself.
+    test.assert(libusb.libusb_has_capability(CAP_HAS_CAPABILITY) == 1)
+    test.assert(libusb.libusb_setlocale("en") == 0)
+
+@test
+fn test_an_error_code_is_named_and_described() [io, ffi]
+    test.case("libusb_error_name, libusb_strerror")
+    test.assert(ptr.read_str(libusb.libusb_error_name(ERROR_ACCESS)) == "LIBUSB_ERROR_ACCESS")
+    test.assert(ptr.read_str(libusb.libusb_error_name(ERROR_NOT_FOUND)) == "LIBUSB_ERROR_NOT_FOUND")
+    // Zero is both `LIBUSB_SUCCESS` and `LIBUSB_TRANSFER_COMPLETED`,
+    // and the library names both.
+    test.assert(ptr.read_str(libusb.libusb_error_name(0))
+                == "LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED")
+    // The sentence is in the language `libusb_setlocale` chose.
+    test.assert(str.len(ptr.read_str(libusb.libusb_strerror(ERROR_ACCESS))) > 0)
+
+@test
+fn test_the_device_list_is_taken_and_freed() [io, ffi]
+    test.case("libusb_get_device_list, libusb_free_device_list, libusb_ref_device, libusb_unref_device")
+    let ctx = session()
+    test.assert(ctx != 0)
+    let slot = ptr.alloc_word()
+    // The count is a C `int`, and a failure would be negative.
+    let n = libusb.libusb_get_device_list(ctx, slot) as i32
+    test.assert(n >= 0)
+    let devs = ptr.read_word(slot)
+    if n > 0
+        // The list is an array of addresses, one every eight bytes.
+        let first = ptr.read_word(devs)
+        test.assert(first != 0)
+        // A reference keeps a device alive past the list it came from,
+        // and answers the same device.
+        test.assert(libusb.libusb_ref_device(first) == first)
+        libusb.libusb_unref_device(first)
+    libusb.libusb_free_device_list(devs, 1)
+    ptr.free(slot)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_a_device_reports_where_it_is_and_how_fast_it_runs() [io, ffi]
+    test.case("libusb_get_bus_number, libusb_get_device_address, libusb_get_port_number, libusb_get_port_numbers, libusb_get_parent, libusb_get_device_speed")
+    let ctx = session()
+    let slot = ptr.alloc_word()
+    let n = libusb.libusb_get_device_list(ctx, slot) as i32
+    let devs = ptr.read_word(slot)
+    if n > 0
+        let dev = ptr.read_word(devs)
+        // A bus number and an address are ONE BYTE each, and the bits
+        // above them are not cleared.
+        test.assert(libusb.libusb_get_bus_number(dev) % 256 >= 0)
+        test.assert(libusb.libusb_get_device_address(dev) % 256 >= 0)
+        test.assert(libusb.libusb_get_port_number(dev) % 256 >= 0)
+        // Seven bytes hold the longest chain the specification allows.
+        let ports = ptr.alloc(MAX_PORT_DEPTH)
+        let depth = libusb.libusb_get_port_numbers(dev, ports, MAX_PORT_DEPTH) as i32
+        test.assert(depth >= 0)
+        test.assert(depth <= MAX_PORT_DEPTH)
+        ptr.free(ports)
+        // A root hub is plugged into nothing and answers 0.
+        let parent = libusb.libusb_get_parent(dev)
+        test.assert(parent >= 0)
+        // 0 is an unknown speed and 5 is SuperSpeed+.
+        let speed = libusb.libusb_get_device_speed(dev) as i32
+        test.assert(speed >= 0)
+        test.assert(speed <= 5)
+    libusb.libusb_free_device_list(devs, 1)
+    ptr.free(slot)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_a_device_descriptor_is_read_without_opening_the_device() [io, ffi]
+    test.case("libusb_get_device_descriptor, libusb_get_max_packet_size, libusb_get_max_iso_packet_size")
+    let ctx = session()
+    let slot = ptr.alloc_word()
+    let n = libusb.libusb_get_device_list(ctx, slot) as i32
+    let devs = ptr.read_word(slot)
+    if n > 0
+        let dev = ptr.read_word(devs)
+        let desc = ptr.alloc(DEVICE_DESCRIPTOR_LEN)
+        test.assert(libusb.libusb_get_device_descriptor(dev, desc) == 0)
+        // Byte 0 is the length and byte 1 is the descriptor type.
+        test.assert(ptr.load_u8(desc) == DEVICE_DESCRIPTOR_LEN)
+        test.assert(ptr.load_u8(desc + 1) == DESCRIPTOR_TYPE_DEVICE)
+        // Byte 7 is the largest packet endpoint zero will carry, and
+        // the specification allows 8, 16, 32 or 64.
+        test.assert(ptr.load_u8(desc + 7) >= 8)
+        // Byte 17 is the number of configurations, and a device has at
+        // least one.
+        test.assert(ptr.load_u8(desc + 17) >= 1)
+        // Both calls read the endpoint descriptors, and ENDPOINT ZERO
+        // IS IN NONE OF THEM: every device has it and no descriptor
+        // declares it, so both answer -5.  Byte 7 of the device
+        // descriptor above is where its packet size lives.
+        let mps = libusb.libusb_get_max_packet_size(dev, 0) as i32
+        test.assert(mps == ERROR_NOT_FOUND)
+        let iso = libusb.libusb_get_max_iso_packet_size(dev, 0) as i32
+        test.assert(iso == ERROR_NOT_FOUND)
+        ptr.free(desc)
+    libusb.libusb_free_device_list(devs, 1)
+    ptr.free(slot)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_a_configuration_descriptor_is_read_and_released() [io, ffi]
+    test.case("libusb_get_active_config_descriptor, libusb_get_config_descriptor, libusb_free_config_descriptor")
+    let ctx = session()
+    let slot = ptr.alloc_word()
+    let n = libusb.libusb_get_device_list(ctx, slot) as i32
+    let devs = ptr.read_word(slot)
+    if n > 0
+        let dev = ptr.read_word(devs)
+        let out = ptr.alloc_word()
+        // A device that is not configured answers -5, which is a fact
+        // about the device and not a failure of the call.
+        let rc = libusb.libusb_get_active_config_descriptor(dev, out) as i32
+        test.assert(rc == 0 or rc == ERROR_NOT_FOUND)
+        if rc == 0
+            let cfg = ptr.read_word(out)
+            // The first nine bytes are the ones the USB specification
+            // lays down: the length, the type, the total length, the
+            // interface count, the value, the string index, the
+            // attributes and the power.
+            test.assert(ptr.load_u8(cfg) == CONFIG_DESCRIPTOR_LEN)
+            test.assert(ptr.load_u8(cfg + 1) == DESCRIPTOR_TYPE_CONFIG)
+            test.assert(ptr.load_u8(cfg + 4) >= 1)
+            libusb.libusb_free_config_descriptor(cfg)
+        // The first configuration by index, which every device has.
+        let rc2 = libusb.libusb_get_config_descriptor(dev, 0, out) as i32
+        if rc2 == 0
+            let cfg2 = ptr.read_word(out)
+            test.assert(ptr.load_u8(cfg2 + 1) == DESCRIPTOR_TYPE_CONFIG)
+            libusb.libusb_free_config_descriptor(cfg2)
+        ptr.free(out)
+    libusb.libusb_free_device_list(devs, 1)
+    ptr.free(slot)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_opening_a_device_that_is_not_attached_fails() [io, ffi]
+    test.case("libusb_open, libusb_open_device_with_vid_pid, libusb_close, libusb_get_device")
+    let ctx = session()
+    // 0x0000 is reserved: no device carries it as a vendor identifier,
+    // so no device is opened and no privilege is needed.
+    let handle = libusb.libusb_open_device_with_vid_pid(ctx, NO_VENDOR, NO_PRODUCT)
+    test.assert(handle == 0)
+    // The whole open-device sequence, in the branch a machine with that
+    // device would take.  It is never entered here.
+    if handle != 0
+        let dev = libusb.libusb_get_device(handle)
+        test.assert(dev != 0)
+        let again = ptr.alloc_word()
+        test.assert(libusb.libusb_open(dev, again) == 0)
+        libusb.libusb_close(ptr.read_word(again))
+        ptr.free(again)
+        libusb.libusb_close(handle)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_the_configuration_and_interface_calls_of_an_open_device() [io, ffi]
+    test.case("libusb_get_configuration, libusb_set_configuration, libusb_claim_interface, libusb_release_interface, libusb_set_interface_alt_setting, libusb_clear_halt, libusb_reset_device")
+    let ctx = session()
+    let handle = libusb.libusb_open_device_with_vid_pid(ctx, NO_VENDOR, NO_PRODUCT)
+    test.assert(handle == 0)
+    // Every call below needs an open device and the privilege to talk
+    // to it, so the suite writes the sequence and does not run it.
+    if handle != 0
+        let slot = ptr.alloc_word()
+        test.assert(libusb.libusb_get_configuration(handle, slot) == 0)
+        test.assert(libusb.libusb_set_configuration(handle, 1) == 0)
+        test.assert(libusb.libusb_claim_interface(handle, 0) == 0)
+        test.assert(libusb.libusb_set_interface_alt_setting(handle, 0, 0) == 0)
+        test.assert(libusb.libusb_clear_halt(handle, 0x81) == 0)
+        test.assert(libusb.libusb_release_interface(handle, 0) == 0)
+        test.assert(libusb.libusb_reset_device(handle) == 0)
+        ptr.free(slot)
+        libusb.libusb_close(handle)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_the_kernel_driver_calls_and_the_string_descriptors() [io, ffi]
+    test.case("libusb_kernel_driver_active, libusb_detach_kernel_driver, libusb_attach_kernel_driver, libusb_set_auto_detach_kernel_driver, libusb_get_string_descriptor_ascii")
+    let ctx = session()
+    let handle = libusb.libusb_open_device_with_vid_pid(ctx, NO_VENDOR, NO_PRODUCT)
+    test.assert(handle == 0)
+    // Taking an interface away from a kernel driver needs the
+    // privilege to do it, so the suite writes the sequence and does
+    // not run it.
+    if handle != 0
+        test.assert(libusb.libusb_set_auto_detach_kernel_driver(handle, 1) == 0)
+        if libusb.libusb_kernel_driver_active(handle, 0) == 1
+            test.assert(libusb.libusb_detach_kernel_driver(handle, 0) == 0)
+            test.assert(libusb.libusb_attach_kernel_driver(handle, 0) == 0)
+        let text = ptr.alloc(256)
+        test.assert(libusb.libusb_get_string_descriptor_ascii(handle, 1, text, 256) > 0)
+        ptr.free(text)
+        libusb.libusb_close(handle)
+    libusb.libusb_exit(ctx)
+
+@test
+fn test_the_three_synchronous_transfers() [io, ffi]
+    test.case("libusb_control_transfer, libusb_bulk_transfer, libusb_interrupt_transfer")
+    let ctx = session()
+    let handle = libusb.libusb_open_device_with_vid_pid(ctx, NO_VENDOR, NO_PRODUCT)
+    test.assert(handle == 0)
+    // A transfer reaches the device, so the suite writes the sequence
+    // and does not run it.
+    if handle != 0
+        let buf = ptr.alloc(64)
+        let moved = ptr.alloc_word()
+        // 0x80 reads, request 6 is GET_DESCRIPTOR, and 0x0100 asks for
+        // the device descriptor.  The timeout is a second.
+        test.assert(libusb.libusb_control_transfer(handle, 0x80, 6, 0x0100, 0, buf, 18, 1000) == 18)
+        test.assert(libusb.libusb_bulk_transfer(handle, 0x81, buf, 64, moved, 1000) == 0)
+        test.assert(libusb.libusb_interrupt_transfer(handle, 0x81, buf, 64, moved, 1000) == 0)
+        ptr.free(moved)
+        ptr.free(buf)
+        libusb.libusb_close(handle)
+    libusb.libusb_exit(ctx)
