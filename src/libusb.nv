@@ -1,11 +1,11 @@
 // The C entry points of libusb-1.0, one novo-lang declaration each.
 //
-// A pointer is an `Int`: the C API hands out four opaque handles, the
-// session `libusb_context*`, the device `libusb_device*`, the open
+// A pointer is an `Int`.  The C API hands out four opaque handles, the
+// context `libusb_context*`, the device `libusb_device*`, the open
 // device `libusb_device_handle*` and the device list, which is an
 // array of device pointers.  This module carries each of them as the
 // address the C library returned.  Zero is the null pointer, and a
-// null context selects the default session libusb creates for a
+// null context selects the default context libusb creates for a
 // process that never asked for one.
 //
 // An out-parameter is the address of a slot the caller owns.
@@ -13,340 +13,578 @@
 // the width libusb writes for a context, a handle or a list, and
 // `ptr.read_word` reads it back.
 //
-// A descriptor is a structure behind a pointer, and the caller lays
-// out the bytes.  The README's "The rules a user needs" gives the byte
-// offsets of the two this package reads.
+// A descriptor is a structure behind a pointer, and the caller reads
+// the bytes.  The README's section "The rules a user needs" gives the
+// byte offsets of the two this package reads.
 //
 // A `const char *` return value is an address the library owns.  Read
 // it with `ptr.read_str` and do not free it.
 //
-// EVERY ENTRY POINT THAT ANSWERS A STATUS ANSWERS A NEGATIVE NUMBER ON
-// FAILURE, and a C `int` return arrives in 32 bits.  Bind the value to
-// a local with `as i32` before comparing it with a negative number.
-// An entry point that answers one byte — the bus number, the device
-// address — answers it in one byte, and the bits above it are not
-// cleared: write `% 256` before comparing.
+// Every entry point that answers a status answers a negative
+// `libusb_error` code on failure.  A C `int` return arrives in 32 bits,
+// so convert the value with `as i32` before comparing it with a
+// negative number.  An entry point that answers one byte, such as the
+// bus number or the device address, answers it in one byte.  The bits
+// above it are not cleared, so write `% 256` before comparing.
 //
-// The asynchronous interface is not here.  A `libusb_transfer` carries
-// a C FUNCTION POINTER the caller fills in, and so does every hotplug
-// and polling call.  The README's "What is not included" section lists
-// them.
+// The asynchronous transfer functions are not declared here.  A
+// `libusb_transfer` carries a C function pointer the caller fills in,
+// and so does every hotplug and polling call.  The README's "What is
+// not included" section lists them.
+//
+// The examples in these comments are fenced `novo ignore`, so `novo
+// doc` does not compile them.  A compiled example links against
+// libusb-1.0, and the link fails where that library is not installed.
 
-// Start a libusb session.
+// Initialise libusb and create a context.
 //
-// `ctx` is the address of an eight-byte slot the session handle is
-// written into, or 0 to initialise the default session instead.
-// Answers 0 on success and a negative error code otherwise.
+// `ctx` is the address of an eight-byte slot the context is written
+// into, or 0 to initialise the default context instead.  The slot is
+// valid only when the call answers 0.  Answers 0 on success and a
+// negative error code otherwise.
+//
+// ```novo ignore
+// let slot = ptr.alloc_word()
+// let rc = libusb.libusb_init(slot)
+// let ctx = ptr.read_word(slot)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_init")
 fn libusb_init(ctx: Int) -> Int [io, ffi]
 
-// End a libusb session.
+// Deinitialise libusb and destroy a context.
 //
-// Every device list, device handle and device reference taken from the
-// session must be released first.  Passing 0 ends the default session.
+// Close every open device before calling it.  Passing 0 ends the
+// default context.
+//
+// ```novo ignore
+// libusb.libusb_exit(ctx)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_exit")
 fn libusb_exit(ctx: Int) [io, ffi]
 
-// Set the logging verbosity of a session.
+// Set the log message verbosity of a context.
 //
-// `level` is 0 for nothing, 1 for errors, 2 for warnings, 3 for
-// information and 4 for everything.  Messages go to the standard error
-// stream.
+// `level` is 0 for no messages, 1 for errors, 2 for warnings, 3 for
+// information and 4 for debug messages.  Messages go to the standard
+// error stream.  The call does nothing when the `LIBUSB_DEBUG`
+// environment variable was set when the context was created.  The
+// libusb documentation marks the call deprecated in favour of
+// `libusb_set_option`, which is not declared here.
+//
+// ```novo ignore
+// // 1 is LIBUSB_LOG_LEVEL_ERROR.
+// libusb.libusb_set_debug(ctx, 1)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_set_debug")
 fn libusb_set_debug(ctx: Int, level: Int) [io, ffi]
 
-// Get the version of the library.
+// Get the version of the running library.
 //
-// The answer is the address of a structure the library owns: four
-// two-byte numbers — major, minor, micro and nano — followed by two
-// addresses, the release-candidate suffix and the describe string.
+// The answer is the address of a `libusb_version` structure the
+// library owns.  It holds four two-byte numbers, the major, minor,
+// micro and nano versions, followed by two string addresses, the
+// release-candidate suffix and the describe string.
+//
+// ```novo ignore
+// let v = libusb.libusb_get_version()
+// let micro = ptr.load_u8(v + 4)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_version")
 fn libusb_get_version() -> Int [ffi]
 
-// Ask whether this build of the library has a capability.
+// Ask whether the running library has a capability.
 //
-// `capability` is 0x0000 for the capability query itself, 0x0100 for
-// hotplug, 0x0101 for the kernel driver calls and 0x0102 for detaching
-// a kernel driver automatically.  Answers 1 when it does.
+// `capability` is 0x0000 for the capability query itself, 0x0001 for
+// hotplug, 0x0100 for access to HID devices without a kernel driver
+// being detached, and 0x0101 for detaching a kernel driver.  Answers a
+// non-zero number when the library has the capability and 0
+// otherwise.  The non-zero number is not always 1.
+//
+// ```novo ignore
+// // 0x0101 is LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER.
+// let can_detach = libusb.libusb_has_capability(0x0101) != 0
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_has_capability")
 fn libusb_has_capability(capability: Int) -> Int [ffi]
 
-// Set the language the error strings are written in.
+// Set the language of the strings `libusb_strerror` answers.
 //
-// `locale` is a two-letter language code, optionally with a region,
-// such as `"en"` or `"de-DE"`.  Answers 0 on success, -12 when the
-// language is not one the library was built with and -5 when the
-// string is malformed.
+// `locale` begins with a two-letter ISO 639-1 language code, such as
+// `"en"` or `"de-DE"`.  Answers 0 on success, -2,
+// `LIBUSB_ERROR_INVALID_PARAM`, when the string is malformed, and -5,
+// `LIBUSB_ERROR_NOT_FOUND`, when the library has no translation for
+// the language.  The strings are in English until this is called.
+//
+// ```novo ignore
+// let rc = libusb.libusb_setlocale("de")
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_setlocale")
 fn libusb_setlocale(locale: Str) -> Int [io, ffi]
 
-// Get the short name of an error code.
+// Get the name of an error code or a transfer status.
 //
-// The answer is the address of a static string the library owns, such
-// as `"LIBUSB_ERROR_ACCESS"`.  Zero answers
+// The answer is the address of a static ASCII string the library owns,
+// such as `"LIBUSB_ERROR_ACCESS"`.  Zero answers
 // `"LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED"`, because zero is both
-// of those.  A number that is neither answers `"**UNKNOWN**"`.
+// of those.  A number that is neither an error code nor a status
+// answers `"**UNKNOWN**"`.
+//
+// ```novo ignore
+// println(ptr.read_str(libusb.libusb_error_name(rc)))
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_error_name")
 fn libusb_error_name(errcode: Int) -> Int [ffi]
 
-// Get the sentence describing an error code.
+// Get a short description of an error code, for an end user.
 //
-// The answer is the address of a static string the library owns, in
-// the language `libusb_setlocale` chose.
+// The answer is the address of a static UTF-8 string the library owns,
+// in the language `libusb_setlocale` chose.
+//
+// ```novo ignore
+// println(ptr.read_str(libusb.libusb_strerror(rc)))
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_strerror")
 fn libusb_strerror(errcode: Int) -> Int [ffi]
 
-// Get the list of devices attached to the system.
+// Get the list of USB devices attached to the system.
 //
 // `list` is the address of an eight-byte slot the array of device
-// pointers is written into, and the array holds one address every
-// eight bytes.  Answers the number of devices, which may be 0, or a
-// negative error code.  `libusb_free_device_list` releases the array.
+// pointers is written into.  The array holds one address every eight
+// bytes and ends with a null address.  Answers the number of devices,
+// which may be 0, or a negative error code.
+// `libusb_free_device_list` releases the array.
+//
+// ```novo ignore
+// let list_slot = ptr.alloc_word()
+// let n = libusb.libusb_get_device_list(ctx, list_slot) as i32
+// let devs = ptr.read_word(list_slot)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_device_list")
 fn libusb_get_device_list(ctx: Int, list: Int) -> Int [io, ffi]
 
 // Release a device list.
 //
 // `unref_devices` is 1 to drop the reference the list holds on every
-// device in it, which is what a caller that kept none of them wants,
-// and 0 to leave the references alone.
+// device in it, and 0 to leave the references alone.
+//
+// ```novo ignore
+// libusb.libusb_free_device_list(devs, 1)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_free_device_list")
 fn libusb_free_device_list(list: Int, unref_devices: Int) [io, ffi]
 
 // Take a reference on a device.
 //
 // Answers the same device.  A device stays alive while any reference
-// to it does, which is how a program keeps one device out of a list it
-// is about to free.
+// to it does, so a reference keeps one device alive after the list it
+// came from is freed.
+//
+// ```novo ignore
+// let kept = libusb.libusb_ref_device(dev)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_ref_device")
 fn libusb_ref_device(dev: Int) -> Int [ffi]
 
 // Drop a reference on a device.
 //
-// The device is destroyed when the last reference goes.
+// The device is destroyed when its last reference is dropped.
+//
+// ```novo ignore
+// libusb.libusb_unref_device(kept)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_unref_device")
 fn libusb_unref_device(dev: Int) [ffi]
 
-// Get the number of the bus a device is on.
+// Get the number of the bus a device is connected to.
 //
-// The answer is ONE BYTE, and the bits above it are not cleared.
+// The answer is one byte, and the bits above it are not cleared.
 // Write `% 256` before comparing it with a number.
+//
+// ```novo ignore
+// let bus = libusb.libusb_get_bus_number(dev) % 256
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_bus_number")
 fn libusb_get_bus_number(dev: Int) -> Int [ffi]
 
-// Get the address a device has on its bus.
+// Get the address of a device on the bus it is connected to.
 //
 // The answer is one byte, as the bus number is.  A bus number and an
 // address together identify a device while it stays plugged in.
+//
+// ```novo ignore
+// let addr = libusb.libusb_get_device_address(dev) % 256
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_device_address")
 fn libusb_get_device_address(dev: Int) -> Int [ffi]
 
-// Get the number of the port a device is plugged into.
+// Get the number of the port a device is connected to.
 //
-// Answers 0 when the device is a root hub, which is plugged into
-// nothing.
+// The answer is one byte, as the bus number is.  Answers 0 when the
+// port number is not available, as for a root hub.
+//
+// ```novo ignore
+// let port = libusb.libusb_get_port_number(dev) % 256
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_port_number")
 fn libusb_get_port_number(dev: Int) -> Int [ffi]
 
-// Write the chain of port numbers from the root hub to a device.
+// Write the list of port numbers from the root hub to a device.
 //
-// `port_numbers` is a buffer of `port_numbers_len` bytes, and seven is
-// enough for any chain the USB specification allows.  Answers the
-// number of ports written, or -2 when the buffer is too small.
+// `port_numbers` is a buffer of `port_numbers_len` bytes.  The USB 3.0
+// specification limits the depth to seven, so seven bytes hold any
+// chain.  Answers the number of ports written, or -8,
+// `LIBUSB_ERROR_OVERFLOW`, when the buffer is too small.
+//
+// ```novo ignore
+// let depth = libusb.libusb_get_port_numbers(dev, ports, 7) as i32
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_port_numbers")
 fn libusb_get_port_numbers(dev: Int, port_numbers: Int, port_numbers_len: Int) -> Int [ffi]
 
-// Get the hub a device is plugged into.
+// Get the parent of a device, the hub it is connected to.
 //
-// Answers 0 for a root hub.  The answer is valid only while the device
-// list the device came from is still alive.
+// Answers 0 when there is no parent, as for a root hub.  The answer is
+// valid only between the `libusb_get_device_list` and the
+// `libusb_free_device_list` of the list the device came from.
+//
+// ```novo ignore
+// let hub = libusb.libusb_get_parent(dev)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_parent")
 fn libusb_get_parent(dev: Int) -> Int [ffi]
 
-// Get the speed a device is running at.
+// Get the speed a device is operating at.
 //
-// Answers 0 when the speed is unknown, 1 for low speed, 2 for full
-// speed, 3 for high speed, 4 for SuperSpeed and 5 for SuperSpeed+.
+// Answers 0 when the operating system does not know it.  Otherwise it
+// answers 1 for low speed, 2 for full speed, 3 for high speed, 4 for
+// SuperSpeed, 5 for SuperSpeed+ and, from libusb 1.0.27, 6 for
+// SuperSpeed+ at 20 Gbit/s.
+//
+// ```novo ignore
+// let speed = libusb.libusb_get_device_speed(dev) as i32
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_device_speed")
 fn libusb_get_device_speed(dev: Int) -> Int [ffi]
 
-// Get the largest packet an endpoint of a device will carry.
+// Get the largest packet an endpoint of a device can send or receive.
 //
-// `endpoint` is the endpoint address out of its descriptor.  Answers
-// the size in bytes, or -5 when no descriptor declares that endpoint.
-// ENDPOINT ZERO IS DECLARED BY NO DESCRIPTOR: every device has it, and
-// byte 7 of the device descriptor is where its packet size lives, so
-// this call answers -5 for it.
+// `endpoint` is the endpoint address out of its descriptor.  The call
+// reads the active configuration and the first alternate setting of
+// each interface.  Answers the size in bytes, -5,
+// `LIBUSB_ERROR_NOT_FOUND`, when no descriptor declares the endpoint,
+// and -99, `LIBUSB_ERROR_OTHER`, on other failures.  Endpoint zero is
+// declared by no descriptor, so the call answers -5 for it.  Byte 7 of
+// the device descriptor holds its packet size.
+//
+// ```novo ignore
+// let mps = libusb.libusb_get_max_packet_size(dev, 0x81) as i32
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_max_packet_size")
 fn libusb_get_max_packet_size(dev: Int, endpoint: Int) -> Int [ffi]
 
-// Get the bytes an isochronous endpoint will carry in one microframe.
+// Get the number of bytes an endpoint can carry in one microframe.
 //
-// This is the packet size multiplied by the number of transactions per
-// microframe, which is what an isochronous transfer must be sized
-// against.  It reads the endpoint descriptors, so it answers -5 for an
-// endpoint no descriptor declares.
+// For an isochronous or interrupt endpoint, the answer is the packet
+// size multiplied by the number of transactions per microframe.  For
+// other endpoints it is the packet size.  The call reads the same
+// descriptors as `libusb_get_max_packet_size` and answers the same
+// error codes.
+//
+// ```novo ignore
+// let per_microframe = libusb.libusb_get_max_iso_packet_size(dev, 0x81) as i32
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_max_iso_packet_size")
 fn libusb_get_max_iso_packet_size(dev: Int, endpoint: Int) -> Int [ffi]
 
-// Read a device's device descriptor.
+// Read the device descriptor of a device.
 //
 // `desc` is the address of eighteen bytes the caller owns, and libusb
-// writes the descriptor into them.  The layout is the one the USB
-// specification gives for a device descriptor, and the README lists
-// the offsets.  Answers 0 on success; the descriptor is cached, so the
-// call reaches no hardware and needs no privileges.
+// writes a `libusb_device_descriptor` into them.  The README lists the
+// offsets.  The descriptor is cached in memory, so the call sends no
+// request to the device.  Since libusb 1.0.16 it always answers 0.
+//
+// ```novo ignore
+// let desc = ptr.alloc(18)
+// let _ = libusb.libusb_get_device_descriptor(dev, desc)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_device_descriptor")
 fn libusb_get_device_descriptor(dev: Int, desc: Int) -> Int [ffi]
 
-// Read the configuration descriptor a device is currently using.
+// Read the configuration descriptor of the configuration a device is
+// in.
 //
 // `config` is the address of an eight-byte slot the descriptor's
-// address is written into.  Answers 0 on success and -5 when the
-// device is not configured.  `libusb_free_config_descriptor` releases
-// what it gives.
+// address is written into.  The call sends no request to the device.
+// Answers 0 on success, -5, `LIBUSB_ERROR_NOT_FOUND`, when the device
+// is not configured, and another negative code on other failures.
+// `libusb_free_config_descriptor` releases the descriptor.
+//
+// ```novo ignore
+// let rc = libusb.libusb_get_active_config_descriptor(dev, out) as i32
+// let cfg = ptr.read_word(out)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_active_config_descriptor")
 fn libusb_get_active_config_descriptor(dev: Int, config: Int) -> Int [io, ffi]
 
 // Read one of a device's configuration descriptors by index.
 //
-// `config_index` is between zero and the configuration count in the
-// device descriptor.  Answers 0 on success and -5 when there is no
-// such configuration.
+// `config_index` runs from 0 to one less than the number of
+// configurations in the device descriptor.  `config` is as for
+// `libusb_get_active_config_descriptor`.  The call sends no request to
+// the device.  Answers 0 on success and -5 when there is no such
+// configuration.
+//
+// ```novo ignore
+// let rc = libusb.libusb_get_config_descriptor(dev, 0, out) as i32
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_config_descriptor")
 fn libusb_get_config_descriptor(dev: Int, config_index: Int, config: Int) -> Int [io, ffi]
 
 // Release a configuration descriptor.
+//
+// Passing 0 does nothing.
+//
+// ```novo ignore
+// libusb.libusb_free_config_descriptor(cfg)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_free_config_descriptor")
 fn libusb_free_config_descriptor(config: Int) [ffi]
 
-// Open a device.
+// Open a device and obtain a device handle.
 //
-// `handle` is the address of an eight-byte slot the open handle is
-// written into.  Answers 0 on success, -3 when the process may not
-// open the device and -4 when the device has been unplugged.  THIS IS
-// THE CALL THAT NEEDS PRIVILEGES: everything above it reads what the
-// operating system already knows.
+// `handle` is the address of an eight-byte slot the handle is written
+// into.  The handle holds a reference on the device until
+// `libusb_close`.  Answers 0 on success, -3, `LIBUSB_ERROR_ACCESS`,
+// when the process has insufficient permissions, and -4,
+// `LIBUSB_ERROR_NO_DEVICE`, when the device has been disconnected.
+// On Linux this is the first call that needs permission on the device
+// node.
+//
+// ```novo ignore
+// let rc = libusb.libusb_open(dev, handle_slot)
+// let handle = ptr.read_word(handle_slot)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_open")
 fn libusb_open(dev: Int, handle: Int) -> Int [io, ffi]
 
-// Close an open device.
+// Close a device handle.
 //
-// Every interface claimed on the handle must be released first.
+// Release every interface claimed on the handle first.  The call drops
+// the reference `libusb_open` took, and it sends no request to the
+// device.
+//
+// ```novo ignore
+// libusb.libusb_close(handle)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_close")
 fn libusb_close(dev_handle: Int) [io, ffi]
 
 // Open the first device with a vendor and product identifier.
 //
-// Answers the handle, or 0 when no such device is attached or the
-// process may not open it — the two cases are not told apart, which is
-// why this call is for a program that knows its own device and not for
-// one that is looking.
+// Answers the handle, or 0 on an error or when no such device is
+// found.  The two cases are not told apart, and only the first of
+// several matching devices is opened.  The libusb documentation
+// intends it for quick test programs rather than applications.
+//
+// ```novo ignore
+// let handle = libusb.libusb_open_device_with_vid_pid(ctx, 0x1d6b, 0x0002)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_open_device_with_vid_pid")
 fn libusb_open_device_with_vid_pid(ctx: Int, vendor_id: Int, product_id: Int) -> Int [io, ffi]
 
-// Get the device an open handle belongs to.
+// Get the device a handle belongs to.
 //
-// The answer takes no new reference, and it lives as long as the
-// handle does.
+// The call takes no new reference, so the caller does not drop one.
+//
+// ```novo ignore
+// let dev = libusb.libusb_get_device(handle)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_device")
 fn libusb_get_device(dev_handle: Int) -> Int [ffi]
 
-// Get the configuration a device is currently in.
+// Get the configuration a device is in.
 //
-// `config` is the address of a four-byte slot the configuration value
-// is written into, and 0 means the device is not configured.
+// `config` is the address of a four-byte slot the
+// `bConfigurationValue` is written into, and 0 means the device is not
+// configured.  The call may send a request to the device.  Answers 0
+// on success and -4 when the device has been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_get_configuration(handle, value_slot)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_configuration")
 fn libusb_get_configuration(dev_handle: Int, config: Int) -> Int [io, ffi]
 
-// Put a device into a configuration.
+// Set the configuration of a device.
 //
-// `configuration` is a value out of a configuration descriptor, and -1
-// unconfigures the device.  No interface may be claimed when this is
-// called.
+// `configuration` is the `bConfigurationValue` of a configuration
+// descriptor, and -1 puts the device in the unconfigured state.  Set
+// the configuration before claiming any interface.  Answers 0 on
+// success, -5 when there is no such configuration, -6,
+// `LIBUSB_ERROR_BUSY`, when an interface is claimed, and -4 when the
+// device has been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_set_configuration(handle, 1)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_set_configuration")
 fn libusb_set_configuration(dev_handle: Int, configuration: Int) -> Int [io, ffi]
 
-// Claim an interface on an open device.
+// Claim an interface on a device handle.
 //
-// A program must claim an interface before any transfer on it.
-// Answers 0 on success, -4 when the device is gone, -6 when another
-// program holds the interface and -12 when a kernel driver does.
+// An interface must be claimed before any transfer on its endpoints.
+// Claiming an interface already claimed on the same handle answers 0
+// and does nothing.  Answers 0 on success, -5 when there is no such
+// interface, -6, `LIBUSB_ERROR_BUSY`, when another program or a kernel
+// driver has claimed it, and -4 when the device has been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_claim_interface(handle, 0)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_claim_interface")
 fn libusb_claim_interface(dev_handle: Int, interface_number: Int) -> Int [io, ffi]
 
-// Release an interface on an open device.
+// Release an interface claimed on a device handle.
 //
-// This sends a control message, so it can fail.
+// The call sends a SET_INTERFACE request to the device, which resets
+// the interface to its first alternate setting.  Answers 0 on success,
+// -5 when the interface was not claimed, and -4 when the device has
+// been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_release_interface(handle, 0)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_release_interface")
 fn libusb_release_interface(dev_handle: Int, interface_number: Int) -> Int [io, ffi]
 
-// Choose the alternate setting of a claimed interface.
+// Activate an alternate setting of a claimed interface.
 //
-// An interface has one or more settings, and the endpoints and their
-// bandwidth differ between them.
+// An interface has one or more alternate settings, and the endpoints
+// and their bandwidth differ between them.  Answers 0 on success, -5
+// when the interface was not claimed or the setting does not exist,
+// and -4 when the device has been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_set_interface_alt_setting(handle, 0, 1)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_set_interface_alt_setting")
 fn libusb_set_interface_alt_setting(dev_handle: Int, interface_number: Int,
                                     alternate_setting: Int) -> Int [io, ffi]
 
-// Clear the halt condition on an endpoint.
+// Clear the halt condition of an endpoint.
 //
-// An endpoint halts after a transfer fails, and refuses everything
-// until this is called.  It also resets the endpoint's data toggle.
+// An endpoint with halt status can neither receive nor send data until
+// the condition is cleared.  A transfer on it answers -9,
+// `LIBUSB_ERROR_PIPE`.  Cancel any transfer pending on the endpoint
+// first.  Answers 0 on success, -5 when the endpoint does not exist,
+// and -4 when the device has been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_clear_halt(handle, 0x81)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_clear_halt")
 fn libusb_clear_halt(dev_handle: Int, endpoint: Int) -> Int [io, ffi]
 
-// Reset a device.
+// Reset a device through its USB port.
 //
-// Answers 0 when the device came back as it was, and -4 when it came
-// back different or did not come back: the handle is then useless and
-// the device must be found and opened again.
+// The system then restores the previous configuration and alternate
+// settings.  The call blocks, usually for a noticeable time.  Answers 0
+// on success.  Answers -5, `LIBUSB_ERROR_NOT_FOUND`, when the device
+// must be found again, because the reset failed, the descriptors
+// changed or the device was disconnected.  The handle is then no longer
+// valid.  Close it, and find and open the device again.
+//
+// ```novo ignore
+// let rc = libusb.libusb_reset_device(handle)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_reset_device")
 fn libusb_reset_device(dev_handle: Int) -> Int [io, ffi]
 
-// Ask whether a kernel driver holds an interface.
+// Ask whether a kernel driver is active on an interface.
 //
-// Answers 1 when one does.  Answers -98 on an operating system that
-// has no such notion.
+// Answers 1 when one is and 0 when none is.  Answers -4 when the
+// device has been disconnected, and -12, `LIBUSB_ERROR_NOT_SUPPORTED`,
+// on a platform where the question cannot be asked.
+//
+// ```novo ignore
+// let held = libusb.libusb_kernel_driver_active(handle, 0) == 1
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_kernel_driver_active")
 fn libusb_kernel_driver_active(dev_handle: Int, interface_number: Int) -> Int [io, ffi]
 
-// Take an interface away from the kernel driver holding it.
+// Detach the kernel driver from an interface.
 //
-// The driver gets it back with `libusb_attach_kernel_driver`, or when
-// the device is closed if the automatic detach is on.
+// Once detached, the interface can be claimed.  Answers 0 on success,
+// -5 when no kernel driver was active, -2 when the interface does not
+// exist, -4 when the device has been disconnected, and -12 on a
+// platform without the facility, which includes Windows.
+// `libusb_attach_kernel_driver` gives the interface back.
+//
+// ```novo ignore
+// let rc = libusb.libusb_detach_kernel_driver(handle, 0)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_detach_kernel_driver")
 fn libusb_detach_kernel_driver(dev_handle: Int, interface_number: Int) -> Int [io, ffi]
 
-// Give an interface back to its kernel driver.
+// Re-attach the kernel driver of an interface.
+//
+// Answers 0 on success, -5 when no kernel driver was active, -2 when
+// the interface does not exist, -4 when the device has been
+// disconnected, -12 on a platform without the facility, and -6 when
+// the interface is claimed by a program or a driver.
+//
+// ```novo ignore
+// let rc = libusb.libusb_attach_kernel_driver(handle, 0)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_attach_kernel_driver")
 fn libusb_attach_kernel_driver(dev_handle: Int, interface_number: Int) -> Int [io, ffi]
 
-// Detach and reattach the kernel driver around every claim.
+// Turn automatic kernel driver detachment on or off for a handle.
 //
-// `enable` is 1 to turn it on.  It is what a program that only wants
-// its own device to work should do, and it needs the capability
-// 0x0102.
+// `enable` is 1 to turn it on and 0 to turn it off, and it is off on a
+// newly opened handle.  When it is on, libusb detaches the kernel
+// driver of an interface when the interface is claimed and re-attaches
+// it when the interface is released.  Answers 0 on success.  Answers
+// -12 on a platform without capability 0x0101, and libusb then
+// continues as if the call had not been made.
+//
+// ```novo ignore
+// let rc = libusb.libusb_set_auto_detach_kernel_driver(handle, 1)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_set_auto_detach_kernel_driver")
 fn libusb_set_auto_detach_kernel_driver(dev_handle: Int, enable: Int) -> Int [io, ffi]
 
-// Read a string descriptor and write it out as ASCII.
+// Read a string descriptor as a C string in ASCII.
 //
 // `desc_index` is a string index out of another descriptor, and 0 is
-// not a string.  `data` is a buffer of `length` bytes.  Answers the
-// number of bytes written, or a negative error code.  The device is
-// asked, so this needs an open handle.
+// not a string.  `data` is a buffer of `length` bytes.  The string is
+// read in the first language the device supports, and it ends with a
+// zero byte.  Answers the number of bytes written, or a negative error
+// code.  The call sends a request to the device, so it needs an open
+// handle.
+//
+// ```novo ignore
+// let n = libusb.libusb_get_string_descriptor_ascii(handle, 2, text, 256)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_get_string_descriptor_ascii")
 fn libusb_get_string_descriptor_ascii(dev_handle: Int, desc_index: Int, data: Int,
                                       length: Int) -> Int [io, ffi]
 
-// Perform a control transfer.
+// Perform a control transfer on endpoint zero.
 //
-// `bm_request_type` carries the direction in its top bit: 0x80 reads
-// and 0x00 writes.  `data` is a buffer of `w_length` bytes, and
-// `timeout` is in milliseconds, where 0 waits for ever.  Answers the
-// number of bytes transferred, or a negative error code — -7 for a
-// timeout, -9 when the endpoint halted.
+// `bm_request_type` carries the direction in its top bit, where 0x80
+// is from the device to the host and 0x00 the other way.  `data` is a
+// buffer of `w_length` bytes, and `timeout` is in milliseconds, where
+// 0 waits without limit.  Answers the number of bytes transferred, or
+// a negative error code.  -7, `LIBUSB_ERROR_TIMEOUT`, means the
+// timeout ran out.  -9, `LIBUSB_ERROR_PIPE`, means the device does not
+// support the request.
+//
+// ```novo ignore
+// // 0x80 reads, request 6 is GET_DESCRIPTOR and 0x0100 asks for the
+// // device descriptor.
+// let n = libusb.libusb_control_transfer(handle, 0x80, 6, 0x0100, 0, buf, 18, 1000)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_control_transfer")
 fn libusb_control_transfer(dev_handle: Int, bm_request_type: Int, b_request: Int, w_value: Int,
                            w_index: Int, data: Int, w_length: Int, timeout: Int) -> Int [io, ffi]
@@ -355,18 +593,29 @@ fn libusb_control_transfer(dev_handle: Int, bm_request_type: Int, b_request: Int
 //
 // `endpoint` carries the direction in its top bit, as the request type
 // does.  `transferred` is the address of a four-byte slot the byte
-// count is written into, and it is written even when the call fails,
-// which is how a program finds what a timeout got through.  Answers 0
-// on success.
+// count is written into, or 0 to discard it.  The count is written on
+// success and on a timeout, because a timeout can expire after part of
+// the data has moved.  Answers 0 on success, -7 on a timeout, -9 when
+// the endpoint halted, -8, `LIBUSB_ERROR_OVERFLOW`, when the device
+// offered more data than the buffer holds, and -4 when the device has
+// been disconnected.
+//
+// ```novo ignore
+// let rc = libusb.libusb_bulk_transfer(handle, 0x81, buf, 64, moved, 1000)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_bulk_transfer")
 fn libusb_bulk_transfer(dev_handle: Int, endpoint: Int, data: Int, length: Int, transferred: Int,
                         timeout: Int) -> Int [io, ffi]
 
 // Perform an interrupt transfer.
 //
-// The arguments are those of `libusb_bulk_transfer`.  The difference is
-// the endpoint: an interrupt endpoint is polled on a schedule the
-// device asked for, and a bulk endpoint is not.
+// The arguments and the answers are those of `libusb_bulk_transfer`.
+// The difference is the endpoint.  An interrupt endpoint is polled on
+// a schedule its descriptor asks for, and a bulk endpoint is not.
+//
+// ```novo ignore
+// let rc = libusb.libusb_interrupt_transfer(handle, 0x81, buf, 8, moved, 1000)
+// ```
 pub @ffi(library = "usb-1.0", symbol = "libusb_interrupt_transfer")
 fn libusb_interrupt_transfer(dev_handle: Int, endpoint: Int, data: Int, length: Int,
                              transferred: Int, timeout: Int) -> Int [io, ffi]

@@ -1,17 +1,17 @@
-// API tests for the libusb-1.0 bindings.
+// The tests over the entry points of the libusb-1.0 bindings.
 //
 // Every test below calls into the C library, so the suite needs
 // libusb-1.0 installed and linked.  `novo pkg build` type-checks the
-// declarations without it; `novo test` runs them and does not.
+// declarations without it.  `novo test` runs them and does not.
 //
-// NO TEST NEEDS A DEVICE AND NO TEST NEEDS PRIVILEGES.  Starting a
-// session, reading the version, naming an error code and listing the
-// devices are what an ordinary user may do; the list is allowed to be
+// No test needs a device and no test needs privileges.  Creating a
+// context, reading the version, naming an error code and listing the
+// devices are what an ordinary user may do.  The list is allowed to be
 // empty, and every assertion about a device is inside a branch that a
 // machine with no device does not take.  Opening a device is the call
-// that needs privileges, and the one test that reaches it asks for a
-// vendor and product identifier no device has, so the open fails and
-// the sequence behind it is never run.
+// that needs privileges.  The four tests that reach it ask for a vendor
+// and product identifier no device has, so the open fails and the
+// sequence behind it is never run.
 
 use std.test
 use libusb
@@ -35,15 +35,15 @@ const DESCRIPTOR_TYPE_DEVICE: Int = 1
 const CONFIG_DESCRIPTOR_LEN: Int = 9
 const DESCRIPTOR_TYPE_CONFIG: Int = 2
 
-// A chain of ports is at most seven long in the USB specification.
+// A chain of ports is at most seven long in the USB 3.0 specification.
 const MAX_PORT_DEPTH: Int = 7
 
-// A vendor and a product identifier no device has: the USB
-// specification reserves 0x0000 for "no vendor".
+// A vendor and a product identifier no device has.  The USB
+// Implementers Forum assigns no vendor the identifier 0x0000.
 const NO_VENDOR: Int = 0x0000
 const NO_PRODUCT: Int = 0x0000
 
-// Start a session and answer its context.
+// Create a context, and answer it, or 0 when libusb_init fails.
 fn session() -> Int [io, ffi]
     let slot = ptr.alloc_word()
     let rc = libusb.libusb_init(slot)
@@ -68,8 +68,8 @@ fn test_a_session_starts_and_ends() [io, ffi]
 @test
 fn test_the_library_reports_its_version_and_its_capabilities() [io, ffi]
     test.case("libusb_get_version, libusb_has_capability, libusb_setlocale")
-    // The version structure is four two-byte numbers: major, minor,
-    // micro and nano, then two addresses.
+    // The version structure is four two-byte numbers, the major, minor,
+    // micro and nano versions, then two addresses.
     let v = libusb.libusb_get_version()
     test.assert(v != 0)
     test.assert(ptr.load_u8(v) == 1)
@@ -122,7 +122,7 @@ fn test_a_device_reports_where_it_is_and_how_fast_it_runs() [io, ffi]
     let devs = ptr.read_word(slot)
     if n > 0
         let dev = ptr.read_word(devs)
-        // A bus number and an address are ONE BYTE each, and the bits
+        // A bus number and an address are one byte each, and the bits
         // above them are not cleared.
         test.assert(libusb.libusb_get_bus_number(dev) % 256 >= 0)
         test.assert(libusb.libusb_get_device_address(dev) % 256 >= 0)
@@ -133,13 +133,14 @@ fn test_a_device_reports_where_it_is_and_how_fast_it_runs() [io, ffi]
         test.assert(depth >= 0)
         test.assert(depth <= MAX_PORT_DEPTH)
         ptr.free(ports)
-        // A root hub is plugged into nothing and answers 0.
+        // A root hub has no parent, and the call answers 0 for it.
         let parent = libusb.libusb_get_parent(dev)
         test.assert(parent >= 0)
-        // 0 is an unknown speed and 5 is SuperSpeed+.
+        // 0 is an unknown speed and 6, from libusb 1.0.27, is
+        // SuperSpeed+ at 20 Gbit/s.
         let speed = libusb.libusb_get_device_speed(dev) as i32
         test.assert(speed >= 0)
-        test.assert(speed <= 5)
+        test.assert(speed <= 6)
     libusb.libusb_free_device_list(devs, 1)
     ptr.free(slot)
     libusb.libusb_exit(ctx)
@@ -158,16 +159,17 @@ fn test_a_device_descriptor_is_read_without_opening_the_device() [io, ffi]
         // Byte 0 is the length and byte 1 is the descriptor type.
         test.assert(ptr.load_u8(desc) == DEVICE_DESCRIPTOR_LEN)
         test.assert(ptr.load_u8(desc + 1) == DESCRIPTOR_TYPE_DEVICE)
-        // Byte 7 is the largest packet endpoint zero will carry, and
-        // the specification allows 8, 16, 32 or 64.
+        // Byte 7 is the largest packet endpoint zero will carry.  USB 2.0
+        // allows 8, 16, 32 or 64, and a SuperSpeed device writes 9, the
+        // power of two for 512.
         test.assert(ptr.load_u8(desc + 7) >= 8)
         // Byte 17 is the number of configurations, and a device has at
         // least one.
         test.assert(ptr.load_u8(desc + 17) >= 1)
-        // Both calls read the endpoint descriptors, and ENDPOINT ZERO
-        // IS IN NONE OF THEM: every device has it and no descriptor
+        // Both calls read the endpoint descriptors, and endpoint zero is
+        // in none of them.  Every device has it and no descriptor
         // declares it, so both answer -5.  Byte 7 of the device
-        // descriptor above is where its packet size lives.
+        // descriptor above holds its packet size.
         let mps = libusb.libusb_get_max_packet_size(dev, 0) as i32
         test.assert(mps == ERROR_NOT_FOUND)
         let iso = libusb.libusb_get_max_iso_packet_size(dev, 0) as i32
@@ -193,10 +195,10 @@ fn test_a_configuration_descriptor_is_read_and_released() [io, ffi]
         test.assert(rc == 0 or rc == ERROR_NOT_FOUND)
         if rc == 0
             let cfg = ptr.read_word(out)
-            // The first nine bytes are the ones the USB specification
-            // lays down: the length, the type, the total length, the
-            // interface count, the value, the string index, the
-            // attributes and the power.
+            // The first nine bytes follow the USB specification's
+            // layout.  They are the length, the type, the total length,
+            // the interface count, the value, the string index, the
+            // attributes and the maximum power.
             test.assert(ptr.load_u8(cfg) == CONFIG_DESCRIPTOR_LEN)
             test.assert(ptr.load_u8(cfg + 1) == DESCRIPTOR_TYPE_CONFIG)
             test.assert(ptr.load_u8(cfg + 4) >= 1)
@@ -216,8 +218,8 @@ fn test_a_configuration_descriptor_is_read_and_released() [io, ffi]
 fn test_opening_a_device_that_is_not_attached_fails() [io, ffi]
     test.case("libusb_open, libusb_open_device_with_vid_pid, libusb_close, libusb_get_device")
     let ctx = session()
-    // 0x0000 is reserved: no device carries it as a vendor identifier,
-    // so no device is opened and no privilege is needed.
+    // No vendor is assigned 0x0000, so no device is opened and no
+    // privilege is needed.
     let handle = libusb.libusb_open_device_with_vid_pid(ctx, NO_VENDOR, NO_PRODUCT)
     test.assert(handle == 0)
     // The whole open-device sequence, in the branch a machine with that

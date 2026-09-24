@@ -3,17 +3,16 @@
 libusb is a library for talking to USB devices from an ordinary
 program, without writing a kernel driver. It runs on Linux, macOS,
 Windows and the BSDs, and its C API is documented at
-[libusb.info](https://libusb.sourceforge.io/api-1.0/). This package
-declares forty-three of that library's entry points to novo-lang, one
+[the libusb-1.0 API reference](https://libusb.sourceforge.io/api-1.0/).
+This package declares forty-three of its entry points to novo-lang, one
 declaration each.
 
-**Status: a binding, not a port.** Every function in this package is a
-declaration of a function in libusb-1.0. The package contains no logic
-of its own, and it does nothing without the C library installed. The
-forty-three entry points are the ones a program needs to find a device,
-read what it says about itself, open it, claim an interface and move
-bytes in either direction; the section "What is not included" says what
-a program still cannot do with them alone.
+Every function here is a declaration of a function in libusb-1.0. The
+package contains no logic of its own, and it does nothing without the C
+library installed. The forty-three entry points are the ones a program
+needs to find a device, read what it says about itself, open it, claim
+an interface and move bytes in either direction. The section "What is
+not included" says what a program cannot do with them alone.
 
 ## What it is
 
@@ -30,13 +29,13 @@ descriptor** describes one way the device can be set up, and a device
 is in one configuration at a time.
 
 An **interface** is a function of a device, and a device may have
-several: a webcam has one for video and one for audio. A program must
+several. A webcam may have one for video and one for audio. A program must
 **claim** an interface before it may talk to it, and the operating
 system may have given it to a kernel driver already.
 
 An **endpoint** is one direction of one channel into a device. Its
-address carries the direction in its top bit: 0x81 is an endpoint the
-device sends on, 0x01 one it receives on. Endpoint zero is the control
+address carries the direction in its top bit. 0x81 is an endpoint the
+device sends on, and 0x01 is one it receives on. Endpoint zero is the control
 endpoint, which every device has and no descriptor declares.
 
 A **transfer** moves bytes over an endpoint. A **control** transfer
@@ -44,11 +43,12 @@ carries a request in a fixed eight-byte header and is how a device is
 configured. A **bulk** transfer carries a lot of data with no timing
 guarantee. An **interrupt** transfer is small and polled on a schedule
 the device asked for. The fourth kind, **isochronous**, is not in this
-package: it needs the asynchronous interface.
+package, because libusb offers it only as an asynchronous transfer.
 
-A **session** is what libusb calls a context. Every device list and
-every handle belongs to one, and a program that does not want one may
-pass zero and use the default session.
+A **context** is one independent use of libusb inside a program, with
+its own devices and settings. Every device list and every handle
+belongs to one. A program that does not need its own may pass zero and
+use the default context.
 
 ## Install
 
@@ -67,11 +67,11 @@ sudo apt install libusb-1.0-0-dev
 On macOS the Homebrew formula is `libusb`. On other systems the library
 builds from the libusb source.
 
-**Opening a device needs permission.** On Linux a device node belongs
-to root by default, and a program that is not root gets
-`LIBUSB_ERROR_ACCESS`. The usual answer is a udev rule that gives the
-device to a group. Listing the devices and reading their descriptors
-needs no permission at all.
+Opening a device needs permission. On Linux a device node belongs to
+root by default, and a program that is not root gets
+`LIBUSB_ERROR_ACCESS` from `libusb_open`. The usual answer is a udev
+rule that gives the device to a group. Listing the devices and reading
+their descriptors needs no permission on Linux.
 
 ## Example
 
@@ -97,10 +97,10 @@ fn main() [io, ffi]
     let i = 0
     while i < n
         let dev = ptr.read_word(devs + i * 8)
-        // The descriptor is cached, so this reaches no hardware.
+        // The descriptor is cached, so this sends no request to the device.
         let _ = libusb.libusb_get_device_descriptor(dev, desc)
-        // Bytes 8 and 9 are the vendor, 10 and 11 the product, each
-        // written with the low byte first.
+        // Bytes 8 and 9 are the vendor, and 10 and 11 the product.  On a
+        // little-endian machine the low byte comes first.
         let vendor = ptr.load_u8(desc + 8) + ptr.load_u8(desc + 9) * 256
         let product = ptr.load_u8(desc + 10) + ptr.load_u8(desc + 11) * 256
         // A bus number and an address are one byte each.
@@ -116,22 +116,21 @@ fn main() [io, ffi]
     libusb.libusb_exit(ctx)
 ```
 
-The example is fenced as an illustration rather than a compiled block
-because `novo doc` compiles the blocks in documentation comments and not
-the ones in this file. The same calls are in `tests/libusb_tests.nv`,
+The example is not compiled, because it links against libusb-1.0 and
+the link fails where that library is not installed. The same calls are in `tests/libusb_tests.nv`,
 where the device list and the descriptor are asserted.
 
 ## What the package contains
 
 | Module | Contents |
 | --- | --- |
-| `libusb` | Every entry point, in six groups: the session, the library itself, the device list, the descriptors, the open device and the synchronous transfers. |
+| `libusb` | Every entry point, in six groups: the context, the library itself, the device list, the descriptors, the open device and the synchronous transfers. |
 
 The six groups and their sizes:
 
 | Group | Entry points | What it does |
 | --- | --- | --- |
-| The session | 3 | Starts and ends a session and sets its logging level. |
+| The context | 3 | Creates and destroys a context and sets its logging level. |
 | The library | 5 | Reports the version and the capabilities, chooses the language and names an error. |
 | The device list | 12 | Lists the attached devices and answers where each one is and how fast it runs. |
 | The descriptors | 4 | Reads the device and configuration descriptors a device reports. |
@@ -140,14 +139,16 @@ The six groups and their sizes:
 
 ## How to choose an entry point
 
-`libusb_get_device_list` is for a program that is looking: it lists
-everything attached and asks the operating system for nothing it has
-not already cached, so it needs no permission.
+`libusb_get_device_list` is for a program that is looking for a device.
+It lists everything attached, and reading a listed device's
+descriptors sends no request to the device. On Linux none of this needs
+permission.
 
-`libusb_open_device_with_vid_pid` is for a program that knows its own
-device. It answers zero both when no such device is attached and when
-the process may not open it, and it does not say which, so it is the
-wrong call for a program that has to report why.
+`libusb_open_device_with_vid_pid` is for a quick test program that knows
+its own device. It answers zero both when no such device is attached
+and when the process may not open it, and it does not say which. It
+opens only the first of several matching devices. A program that has
+to report why an open failed lists the devices and calls `libusb_open`.
 
 `libusb_control_transfer` is for configuring a device and for the
 standard requests every device answers. `libusb_bulk_transfer` and
@@ -158,11 +159,11 @@ interface declares.
 
 1. **A pointer is an `Int`, and zero is null.** Every handle the C
    library returns arrives as the address it returned, and a null
-   context selects the default session.
+   context selects the default context.
 2. **An out-parameter is an eight-byte slot the caller owns.**
    `ptr.alloc_word` reserves one and `ptr.read_word` reads it back.
-   The session handle, the device list and the device handle all
-   arrive this way.
+   The context, the device list and the device handle all arrive this
+   way.
 3. **A device list is an array of addresses.** The address of device
    `i` is at `list + i * 8`. `libusb_free_device_list` releases the
    array, and 1 for its second argument drops the reference the list
@@ -180,12 +181,16 @@ interface declares.
    | -5 | `LIBUSB_ERROR_NOT_FOUND` | there is no such thing |
    | -6 | `LIBUSB_ERROR_BUSY` | something else holds it |
    | -7 | `LIBUSB_ERROR_TIMEOUT` | the timeout ran out |
-   | -9 | `LIBUSB_ERROR_PIPE` | the endpoint halted |
-   | -12 | `LIBUSB_ERROR_NOT_SUPPORTED` | not on this system |
+   | -8 | `LIBUSB_ERROR_OVERFLOW` | the device sent more than the buffer holds |
+   | -9 | `LIBUSB_ERROR_PIPE` | the endpoint halted, or a control request is not supported |
+   | -10 | `LIBUSB_ERROR_INTERRUPTED` | a system call was interrupted |
+   | -11 | `LIBUSB_ERROR_NO_MEM` | memory ran out |
+   | -12 | `LIBUSB_ERROR_NOT_SUPPORTED` | not on this platform |
+   | -99 | `LIBUSB_ERROR_OTHER` | any other failure |
 
 5. **An entry point that answers one byte answers it in one byte, and
    the bits above it are not cleared.** The bus number, the device
-   address and the port number are bytes: write `% 256` before
+   address and the port number are bytes. Write `% 256` before
    comparing one with a number.
 6. **`libusb_error_name(0)` answers
    `"LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED"`**, because zero is
@@ -210,7 +215,9 @@ interface declares.
    | 16 | 1 | the string index of the serial number |
    | 17 | 1 | the number of configurations |
 
-   Every two-byte field is written with its low byte first, so
+   libusb converts every two-byte field to the host's byte order. On a
+   little-endian machine, which includes x86-64 and 64-bit ARM Linux,
+   the low byte comes first, so
    `ptr.load_u8(desc + 8) + ptr.load_u8(desc + 9) * 256` is the vendor.
 
 8. **The first nine bytes of a configuration descriptor are the
@@ -226,73 +233,80 @@ interface declares.
    | 5 | 1 | the value that selects this configuration |
    | 6 | 1 | the string index of its name |
    | 7 | 1 | the attributes |
-   | 8 | 1 | the power it draws, in units of 2 milliamps |
+   | 8 | 1 | the most power it draws, in units of 2 milliamps at high speed and below, and 8 milliamps at SuperSpeed |
 
-9. **The device descriptor is cached and the configuration descriptors
-   are not fetched from the device either.** Reading them reaches no
-   hardware and needs no permission. Everything from `libusb_open`
-   onwards does.
+9. **Reading a descriptor sends no request to the device.** The device
+   descriptor is cached, and the configuration descriptors are read
+   from what the operating system holds. On Linux this needs no
+   permission. `libusb_open` and everything after it does.
 10. **`libusb_get_max_packet_size` answers -5 for endpoint zero.** It
     reads the endpoint descriptors, and endpoint zero is declared by
     none of them. Byte 7 of the device descriptor is where its packet
     size lives.
-11. **An endpoint address carries its direction in the top bit.** 0x80
-    set means the device sends, clear means it receives. The same bit
+11. **An endpoint address carries its direction in the top bit.** With
+    0x80 set the device sends, and with it clear the device receives. The same bit
     is the top bit of a control transfer's request type.
-12. **A bulk or interrupt transfer writes its byte count even when it
-    fails.** That is how a program finds what got through before a
-    timeout.
+12. **A bulk or interrupt transfer writes its byte count on a timeout
+    too.** libusb may split a transfer into pieces, and the timeout can
+    expire after some of them have moved. The count says how much got
+    through.
 13. **A claim must be released before the handle is closed**, and the
     handle before the session ends.
-14. **`libusb_reset_device` may invalidate the handle.** It answers -4
-    when the device came back different or did not come back, and the
-    device must then be found and opened again.
-15. **A version structure is four two-byte numbers and two addresses**:
-    major at 0, minor at 2, micro at 4, nano at 6, then the
-    release-candidate suffix at 8 and the describe string at 16.
+14. **`libusb_reset_device` may invalidate the handle.** It answers -5,
+    `LIBUSB_ERROR_NOT_FOUND`, when the device came back different or
+    did not come back. The handle is then closed, and the device must be
+    found and opened again.
+15. **A version structure is four two-byte numbers and two addresses.**
+    The major version is at offset 0, the minor at 2, the micro at 4
+    and the nano at 6. The release-candidate suffix is at 8 and the
+    describe string at 16.
 
 ## What is not included
 
-- **The asynchronous interface.** `libusb_alloc_transfer`,
+- **The asynchronous transfers.** `libusb_alloc_transfer`,
   `libusb_submit_transfer` and their relatives are driven by a
   `libusb_transfer` structure whose completion field is a C function
-  pointer, and a novo-lang function is not one. The event loop that
-  runs those callbacks — `libusb_handle_events` and its five variants —
-  goes with them, and so does the isochronous transfer, which has no
-  synchronous form.
+  pointer, and a novo-lang function is not one. The event handling
+  functions that run those callbacks, `libusb_handle_events` and its
+  variants, are left out with them. So is the isochronous transfer,
+  which has no synchronous form.
 - **Hotplug.** `libusb_hotplug_register_callback` takes a C function
   pointer.
-- **The polling interface.** `libusb_get_pollfds` answers an array of
+- **The polling functions.** `libusb_get_pollfds` answers an array of
   structures and `libusb_set_pollfd_notifiers` takes two C function
   pointers.
 - **The logging callback.** `libusb_set_log_cb` takes a C function
   pointer. `libusb_set_debug` is here instead.
 - **`libusb_set_option`.** It is a variadic C function whose arguments
   depend on the option.
-- **The bulk streams and the device memory.** `libusb_alloc_streams`
-  and `libusb_dev_mem_alloc` and their pairs only matter to the
-  asynchronous interface.
+- **The bulk streams and the device memory.** `libusb_alloc_streams`,
+  `libusb_dev_mem_alloc` and their pairs are used only with
+  asynchronous transfers.
 - **The capability descriptors.** `libusb_get_bos_descriptor` and the
   SuperSpeed companion descriptors answer structures whose layout is
   the library's rather than the wire's.
 - **`libusb_init_context`.** It takes an array of option structures and
-  arrived in libusb 1.0.27; `libusb_init` is in every release.
+  arrived in libusb 1.0.27. `libusb_init` is in every release.
 
 ## Related packages
 
-`usb-nv` is the host-side USB stack written in novo-lang, speaking to
-the operating system directly with no C library. It is the package to
-reach for on a system it supports. `usb-nv` is planned and not
-published yet.
+[usb-nv](https://novo-lang.org/packages/usb-nv) is USB 2.0 written in
+novo-lang with no C library. It holds the device side of a USB
+peripheral, with the standard descriptors, the control-transfer state
+machine and the CDC-ACM and HID classes, and a host-side enumeration
+and transfer surface beside them. It is published as an interface
+release. Every function in it is declared and none has a body yet, so
+a program that must talk to a USB device today uses this package.
 
-Choose this package when the program must run wherever libusb runs,
-which is every desktop operating system, or when it needs libusb's own
-handling of the kernel drivers that hold an interface.
+This package is the choice for a program that must run wherever libusb
+runs, which includes Linux, macOS, Windows and the BSDs. It is also the
+choice for a program that needs libusb's handling of the kernel drivers
+that hold an interface.
 
 ## Tests
 
-`tests/libusb_tests.nv` holds eleven tests written against the
-signatures. They call the C library, so `novo test` needs libusb-1.0
+`tests/libusb_tests.nv` holds eleven tests over the forty-three entry
+points. They call the C library, so `novo test` needs libusb-1.0
 installed and linkable:
 
 ```
@@ -302,44 +316,20 @@ novo test tests/libusb_tests.nv
 `novo pkg build` type-checks the declarations and needs nothing
 installed.
 
-**No test needs a device and no test needs privileges.** The device
-list is allowed to be empty, and every assertion about a device is
-inside a branch a machine with none does not take. The three tests that
-reach the open ask for vendor 0x0000, which the USB specification
-reserves and no device carries, so the open fails and the sequence
-behind it — claiming an interface, taking it from a kernel driver,
-moving bytes — is written out and never run. The suite asserts that a
-session starts and ends, that the library reports version 1.0, that
-`LIBUSB_ERROR_ACCESS` is named and described, that the device list is
-taken and freed, that a device's bus number, address and speed are in
-range, that a device descriptor is eighteen bytes of type 1 with at
-least one configuration, that a configuration descriptor is nine bytes
-of type 2, and that `libusb_get_max_packet_size` answers -5 for
-endpoint zero.
+No test needs a device and no test needs privileges. The device list
+is allowed to be empty, and every assertion about a device is inside a
+branch a machine with none does not take. The four tests that reach the
+open ask for vendor 0x0000, which is assigned to no vendor, so the open
+fails. The sequence behind it, which claims an interface, takes it from
+a kernel driver and moves bytes, is written out and never run.
 
-**`novo test` exits 23 on this suite even when every assertion passes.**
-`ptr.read_str` copies a string the C library owns, and the default leak
-check counts that copy as an object the test leaked: the suite makes
-four such copies and the report names four objects. The exit code is
-the leak check's, not an assertion's; the output above it says how many
-assertions passed. Running with `--no-leak-check` exits 0.
-
-## Implementation status
-
-| Group | State |
-| --- | --- |
-| The session | Complete for `libusb_init`. |
-| The library | Complete. |
-| The device list | Complete. |
-| The descriptors | Complete for the device and configuration descriptors. |
-| The open device | Complete. |
-| The transfers | Complete for the control, bulk and interrupt kinds. |
-| Asynchronous transfers | Absent. The transfer structure carries a C function pointer. |
-| Isochronous transfers | Absent. They have no synchronous form. |
-| Hotplug | Absent. It takes a C function pointer. |
-| The polling interface | Absent. It belongs to the event loop. |
-| `libusb_set_option` | Absent. It is variadic. |
-| Capability descriptors | Absent. Their layout is the library's own. |
+The suite asserts what the reference specifies. A context is created
+and destroyed. The library reports version 1.0. `LIBUSB_ERROR_ACCESS`
+is named and described. The device list is taken and freed. A device's
+bus number, address and speed are in range. A device descriptor is
+eighteen bytes of type 1 with at least one configuration. A
+configuration descriptor is nine bytes of type 2.
+`libusb_get_max_packet_size` answers -5 for endpoint zero.
 
 ## Licence
 
